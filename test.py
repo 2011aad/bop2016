@@ -11,21 +11,28 @@ params_dic = {
     'expr': 'Id=2140251882',
     'model': 'latest',
     'attributes': 'RId,Id,AA.AuId,AA.AfId,F.FId,J.JId,C.CId',
-    'count': '200',
+    'count': '1000',
     'offset': '0',
 }
 
-def wrapReq(ex, k, it):
+def sendREQ(expr):
+    params_dic['expr'] = expr
+    params = urllib.urlencode(params_dic)
+    conn.request("GET", "/academic/v1.0/evaluate?%s" % params, "{body}", headers)
+    return json.loads(conn.getresponse().read())
+
+
+def wrapReq(ex, k, it, operator):
     if len(ex)==0:
-        if k=='Id':
-            ex = 'Id=' + str(it)
+        if k=='Id' or k=='RId':
+            ex = k + '=' + str(it)
         else:
             ex = 'Composite(' + k + '=' + str(it) + ')'
     else:
-        if k=='Id':
-            ex = 'Or(Id=' + str(it) + ',' + ex + ')'
+        if k=='Id' or k=='RId':
+            ex = operator + '(' + k + '=' + str(it) + ',' + ex + ')'
         else:
-            ex = 'Or(Composite(' + k + '=' + str(it) + '),' + ex + ')'
+            ex = operator + '(Composite(' + k + '=' + str(it) + '),' + ex + ')'
 
     return ex
 
@@ -48,63 +55,399 @@ def calPath(ps, s, d):
 
 
 
-
-source = 2140251883
-destination = 2142155589
+source = 2123314761
+destination = 1982462162
 MAX_REQ_NUM = 40
-
-path = {source:[]}
-responses = []
-old_data = {'Id':[], 'J.JId':[], 'C.CId':[], 'F.FId':[], 'AA.AuId':[], 'AA.AfId':[]}
-new_data = {'Id':[], 'J.JId':[], 'C.CId':[], 'F.FId':[], 'AA.AuId':[], 'AA.AfId':[]}
+start = 0     #start = 0 : start with id, 1 : start with AuId
+end = 0       #end = 0 : end with id, 1 : end with AuId
 
 conn = httplib.HTTPSConnection('oxfordhk.azure-api.net')
+#determine start id or AuId
 params_dic['expr'] = 'Id=' + str(source)
 params = urllib.urlencode(params_dic)
 conn.request("GET", "/academic/v1.0/evaluate?%s" % params, "{body}", headers)
-responses.append(json.loads(conn.getresponse().read()))
-if not responses[0].get('entities')[0].has_key('AA'):
-    new_data['AA.AuId'].append(source)
+response = json.loads(conn.getresponse().read())
+if len(response.get('entities'))==0 or not response.get('entities')[0].has_key('AA'):
+    start = 1
+    #new_data['AA.AuId'].append(source)
 else:
-    new_data['Id'].append(source)
+    start = 0
+    #new_data['Id'].append(source)
+
+#determine end id or AuId
+params_dic['expr'] = 'Id=' + str(destination)
+params = urllib.urlencode(params_dic)
+conn.request("GET", "/academic/v1.0/evaluate?%s" % params, "{body}", headers)
+response = json.loads(conn.getresponse().read())
+if len(response.get('entities'))==0 or not response.get('entities')[0].has_key('AA'):
+    end = 1
+    #new_data['AA.AuId'].append(source)
+else:
+    end = 0
+    #new_data['Id'].append(source)
+
+result = []
+#start with an Id
+if start == 0:
+    expr = ""
+    expr = wrapReq(expr, 'Id', source, 'Or')
+    response = sendREQ(expr)
+    entity = response.get('entities')[0]
+
+    RIds = entity.get('RId')
+    Id = entity.get('Id')
+    AAs = entity.get('AA')
+    Conf = entity.get('C')
+    Journal = entity.get('J')
+    Fields = entity.get('F')
+
+    #end with an Id
+    if end == 0:
+        #one jump
+        if destination in RIds:
+            result.append([source, destination])
+
+        #two jumps
+        #RIds in the middle
+        expr = ""
+        newEntities = []
+        if RIds:
+            counter = 0
+            for RId in RIds:
+                expr = wrapReq(expr, 'Id', RId, 'Or')
+                counter += 1
+                if counter == MAX_REQ_NUM:
+                    expr = wrapReq(expr, 'RId', destination, 'And')
+
+                    response = sendREQ(expr)
+                    for e in response.get('entities'):
+                        result.append([source,e.get('Id'),destination])
+                    counter = 0
+                    expr = ""
+
+        if len(expr)>0:
+            expr = wrapReq(expr, 'RId', destination, 'And')
+            response = sendREQ(expr)
+        for e in response.get('entities'):
+            result.append([source,e.get('Id'),destination])
+
+        #destination information
+        #others in the middle
+        expr = ""
+        expr = wrapReq(expr, 'Id', destination, 'And')
+        response = sendREQ(expr)
+        destEntity = response.get('entities')[0]
+        if destEntity.get('C'):
+            if Conf and destEntity.get('C').get('CId') == Conf.get('CId'):
+                result.append([source, Conf.get('CId'), destination])
+        if destEntity.get('J'):
+            if Journal and destEntity.get('J').get('JId') == Journal.get('JId'):
+                result.append([source, Journal.get('JId'), destination])
+
+        newFields = destEntity.get('F')
+        if newFields:
+            for nf in newFields:
+                if Fields:
+                    for f in Fields:
+                        if nf.get('FId') == f.get('FId'):
+                            result.append([source, f.get('FId'), destination])
+
+        newAAs = destEntity.get('AA')
+        if newAAs:
+            for nau in newAAs:
+                if AAs:
+                    for au in AAs:
+                        if nau.get('AuId') == au.get('AuId'):
+                            result.append([source, au.get('AuId'), destination])
 
 
-for i in range(3):
-    #Create requests
-    num = 0
-    responses = []
-    counter = 0
-    expr = ''
-    for key in new_data.keys():
-        for item in new_data.get(key):
-            expr = wrapReq(expr, key, item)
-            counter += 1
-            if counter==MAX_REQ_NUM:
-                params_dic['expr'] = expr
-                num += 1
-                p = urllib.urlencode(params_dic)
-                conn.request("GET", "/academic/v1.0/evaluate?%s" % p, "{body}", headers)
-                responses.append(json.loads(conn.getresponse().read()))
-                counter = 0
-                expr = ''
-    if len(expr)>0:
-        params_dic['expr'] = expr
-        num += 1
-        p = urllib.urlencode(params_dic)
-        conn.request("GET", "/academic/v1.0/evaluate?%s" % p, "{body}", headers)
-        responses.append(json.loads(conn.getresponse().read()))
+        #three jumps
 
-    print num
+        #first class (all ids)   bottle neck
+        newEntities = []
+        expr = ""
+        if RIds:
+            counter = 0
+            for RId in RIds:
+                expr = wrapReq(expr, 'Id', RId, 'Or')
+                counter += 1
+                if counter==MAX_REQ_NUM:
+                    response = sendREQ(expr)
+                    newEntities.extend(response.get('entities'))
+                    counter = 0
+                    expr = ""
+            if len(expr)>0:
+                response = sendREQ(expr)
+                newEntities.extend(response.get('entities'))
 
-    print "iteration: " + str(i)
-    #print responses
-    old_data = copy.deepcopy(new_data)
-    new_data = {'Id':[], 'J.JId':[], 'C.CId':[], 'F.FId':[], 'AA.AuId':[], 'AA.AfId':[]}
-    #handle responses
-    for resp in responses:
-        entities = resp.get('entities')
+            for nentity in newEntities:
+                nRIds = nentity.get('RId')
+                ncounter = 0
+                nexpr = ""
+                for nRId in nRIds:
+                    nexpr = wrapReq(nexpr, 'Id', nRId, 'Or')
+                    ncounter += 1
+                    if ncounter == MAX_REQ_NUM:
+                        nexpr = wrapReq(nexpr, 'RId', destination, 'And')
+                        response = sendREQ(nexpr)
+                        for e in response.get('entities'):
+                            result.append([source, nentity.get('Id'), e.get('Id'), destination])
+                        counter = 0
+                        nexpr = ""
+
+                if len(nexpr)>0:
+                    nexpr = wrapReq(nexpr, 'RId', destination, 'And')
+                    response = sendREQ(nexpr)
+                    for e in response.get('entities'):
+                        result.append([source, nentity.get('Id'), e.get('Id'), destination])
+
+        #second class
+        expr = ""
+        newEntities = []
+        if Fields:
+            for f in Fields:
+                expr = wrapReq(expr, 'F.FId', f.get('FId'), 'Or')
+        if Conf:
+            expr = wrapReq(expr, 'C.CId', Conf.get('CId'), 'Or')
+        if Journal:
+            expr = wrapReq(expr, 'J.JId', Journal.get('JId'), 'Or')
+        if AAs:
+            for au in AAs:
+                expr = wrapReq(expr, 'AA.AuId', au.get('AuId'),'Or')
+
+        expr = wrapReq(expr, 'RId', destination, 'And')
+
+        response = sendREQ(expr)
+        newEntities = response.get('entities')
+        for newE in newEntities:
+            if newE.get('C'):
+                if Conf and newE.get('C').get('CId') == Conf.get('CId'):
+                    result.append([source, Conf.get('CId'), newE.get('Id'), destination])
+            if newE.get('J'):
+                if Journal and newE.get('J').get('JId') == Journal.get('JId'):
+                    result.append([source, Journal.get('JId'), newE.get('Id'), destination])
+
+            newFields = newE.get('F')
+            if newFields:
+                for nf in newFields:
+                    if Fields:
+                        for f in Fields:
+                            if nf.get('FId') == f.get('FId'):
+                                result.append([source, f.get('FId'), newE.get('Id'), destination])
+
+            newAAs = newE.get('AA')
+            if newAAs:
+                for nau in newAAs:
+                    if AAs:
+                        for au in AAs:
+                            if nau.get('AuId') == au.get('AuId'):
+                                result.append([source, au.get('AuId'), newE.get('Id'), destination])
+
+
+        #third class
+        dRIds = destEntity.get('RId')
+        dId = destEntity.get('Id')
+        dAAs = destEntity.get('AA')
+        dConf = destEntity.get('C')
+        dJournal = destEntity.get('J')
+        dFields = destEntity.get('F')
+
+        newEntities = []
+        expr2 = ""
+        if dFields:
+            for df in dFields:
+                expr2 = wrapReq(expr2, 'F.FId', df.get('FId'), 'Or')
+        if dConf:
+            expr2 = wrapReq(expr2, 'C.CId', dConf.get('CId'), 'Or')
+        if dJournal:
+            expr2 = wrapReq(expr2, 'J.JId', dJournal.get('JId'), 'Or')
+        if dAAs:
+            for dau in dAAs:
+                expr2 = wrapReq(expr2, 'AA.AuId', dau.get('AuId'),'Or')
+
+        expr1 = ""
+        if RIds and len(expr2)>0:
+            counter = 0
+            for RId in RIds:
+                expr1 = wrapReq(expr1, 'Id', RId, 'Or')
+                counter += 1
+                if counter == MAX_REQ_NUM - 10:
+                    expr = 'And(' + expr1 + ',' + expr2 + ')'
+
+                    response = sendREQ(expr)
+                    newEntities.extend(response.get('entities'))
+                    counter = 0
+                    expr1 = ""
+
+        if len(expr1)>0 and len(expr2)>0:
+            expr = 'And(' + expr1 + ',' + expr2 + ')'
+
+            response = sendREQ(expr)
+            newEntities.extend(response.get('entities'))
+
+        for newE in newEntities:
+            if newE.get('C'):
+                if dConf and newE.get('C').get('CId') == dConf.get('CId'):
+                    result.append([source, newE.get('Id'), Conf.get('CId'), destination])
+            if newE.get('J'):
+                if dJournal and newE.get('J').get('JId') == dJournal.get('JId'):
+                    result.append([source, newE.get('Id'), Journal.get('JId'), destination])
+
+            newFields = newE.get('F')
+            if newFields:
+                for nf in newFields:
+                    if dFields:
+                        for df in dFields:
+                            if nf.get('FId') == df.get('FId'):
+                                result.append([source, newE.get('Id'), df.get('FId'), destination])
+
+            newAAs = newE.get('AA')
+            if newAAs:
+                for nau in newAAs:
+                    if dAAs:
+                        for au in dAAs:
+                            if nau.get('AuId') == dau.get('AuId'):
+                                result.append([source, newE.get('Id'), dau.get('AuId'), destination])
+
+    #end with an AuId
+    else:
+        #one jump
+        if AAs:
+            for AA in AAs:
+                if AA.get('AuId')==destination:
+                    result.append([source, destination])
+                    break;
+
+        #two jumps
+        newEntities = []
+        if RIds:
+            counter = 0
+            for RId in RIds:
+                expr = wrapReq(expr, 'Id', RId, 'Or')
+                counter += 1
+                if counter == MAX_REQ_NUM:
+                    expr = wrapReq(expr, 'AA.AuId', destination, 'And')
+
+                    response = sendREQ(expr)
+                    for e in response.get('entities'):
+                        result.append([source,e.get('Id'),destination])
+                    counter = 0
+                    expr = ""
+        if len(expr)>0:
+            expr = wrapReq(expr, 'AA.AuId', destination, 'And')
+
+            response = sendREQ(expr)
+            newEntities.extend(response.get('entities'))
+        for e in response.get('entities'):
+            result.append([source,e.get('Id'),destination])
+
+        #three jumps
+        #last 4 cases
+        expr = ""
+        newEntities = []
+        if Fields:
+            for f in Fields:
+                expr = wrapReq(expr, 'F.FId', f.get('FId'), 'Or')
+        if Conf:
+            expr = wrapReq(expr, 'C.CId', Conf.get('CId'), 'Or')
+        if Journal:
+            expr = wrapReq(expr, 'J.JId', Journal.get('JId'), 'Or')
+        if AAs:
+            for au in AAs:
+                expr = wrapReq(expr, 'AA.AuId', au.get('AuId'),'Or')
+
+        expr = wrapReq(expr, 'AA.AuId', destination, 'And')
+
+        response = sendREQ(expr)
+        newEntities = response.get('entities')
+        for newE in newEntities:
+            if newE.get('C'):
+                if Conf and newE.get('C').get('CId') == Conf.get('CId'):
+                    result.append([source, Conf.get('CId'), newE.get('Id'), destination])
+            if newE.get('J'):
+                if Journal and newE.get('J').get('JId') == Journal.get('JId'):
+                    result.append([source, Journal.get('JId'), newE.get('Id'), destination])
+
+            newFields = newE.get('F')
+            if newFields:
+                for nf in newFields:
+                    if Fields:
+                        for f in Fields:
+                            if nf.get('FId') == f.get('FId'):
+                                result.append([source, f.get('FId'), newE.get('Id'), destination])
+
+            newAAs = newE.get('AA')
+            if newAAs:
+                for nau in newAAs:
+                    if AAs:
+                        for au in AAs:
+                            if nau.get('AuId') == au.get('AuId'):
+                                result.append([source, au.get('AuId'), newE.get('Id'), destination])
+
+        #case 2  bottle neck
+        newEntities = []
+        expr = ""
+        if RIds:
+            counter = 0
+            for RId in RIds:
+                expr = wrapReq(expr, 'Id', RId, 'Or')
+                counter += 1
+                if counter==MAX_REQ_NUM:
+                    response = sendREQ(expr)
+                    newEntities.extend(response.get('entities'))
+                    counter = 0
+                    expr = ""
+            if len(expr)>0:
+                response = sendREQ(expr)
+                newEntities.extend(response.get('entities'))
+
+            for nentity in newEntities:
+                nRIds = nentity.get('RId')
+                ncounter = 0
+                nexpr = ""
+                for nRId in nRIds:
+                    nexpr = wrapReq(nexpr, 'Id', nRId, 'Or')
+                    ncounter += 1
+                    if ncounter == MAX_REQ_NUM:
+                        nexpr = wrapReq(nexpr, 'AA.AuId', destination, 'And')
+                        response = sendREQ(nexpr)
+                        for e in response.get('entities'):
+                            result.append([source, nentity.get('Id'), e.get('Id'), destination])
+                        ncounter = 0
+                        nexpr = ""
+                if len(nexpr)>0:
+                    nexpr = wrapReq(nexpr, 'AA.AuId', destination, 'And')
+                    response = sendREQ(nexpr)
+                    for e in response.get('entities'):
+                        result.append([source, nentity.get('Id'), e.get('Id'), destination])
+        #case 1
+        expr = ""
+        params_dic['count'] = '1'
+        expr = wrapReq(expr, 'AA.AuId', destination, 'Or')
+        response = sendREQ(expr)
+        params_dic['count'] = '1000'
+        destEntity = response.get('entities')[0]
+        dAAs = destEntity.get('AA')
+        if AAs and dAAs:
+            for AA in AAs:
+                for dAA in dAAs:
+                    if dAA.get('AfId') == AA.get('AfId') and dAA.get('AuId') == destination:
+                        result.append([source, AA.get('AuId'), AA.get('AfId'), destination])
+
+#start with AuId
+else:
+    expr = ""
+    expr = wrapReq(expr, 'AA.AuId', source, 'Or')
+    response = sendREQ(expr)
+    entities = response.get('entities')
+
+    #end with Id
+    if end == 0:
+        expr = ""
+        expr = wrapReq(expr, 'Id', destination, 'Or')
+        response = sendREQ(expr)
+        destEntity = response.get('entities')[0]
         for entity in entities:
-
             RIds = entity.get('RId')
             Id = entity.get('Id')
             AAs = entity.get('AA')
@@ -112,136 +455,123 @@ for i in range(3):
             Journal = entity.get('J')
             Fields = entity.get('F')
 
-            #from id
-            if Id in old_data['Id']:
-                if not path.has_key(Id):
-                    path[Id] = []
+            #one jump
+            if Id == destination:
+                result.append([source,destination])
 
-                #to J.JId
-                if Journal:
-                    JId = Journal.get('JId')
-                    if JId not in new_data.get('J.JId'):
-                        new_data['J.JId'].append(JId)
-                    if JId not in path[Id]:
-                        path[Id].append(JId)
-                #to F.FId
-                if Fields:
-                    for Field in Fields:
-                        FId = Field.get('FId')
-                        if FId not in new_data.get('F.FId'):
-                            new_data['F.FId'].append(FId)
-                        if FId not in path[Id]:
-                            path[Id].append(FId)
-                #to C.CId
-                if Conf:
-                    CId = Conf.get('CId')
-                    if CId not in new_data.get('C.CId'):
-                        new_data['C.CId'].append(CId)
-                    if CId not in path[Id]:
-                        path[Id].append(CId)
-                #to refrence Id
-                if RIds:
-                    for RId in RIds:
-                        if RId not in new_data.get('Id'):
-                            new_data['Id'].append(RId)
-                        if RId not in path[Id]:
-                            path[Id].append(RId)
-                #to AA.AuId
-                if AAs:
-                    for AA in AAs:
-                        AuId = AA.get('AuId')
-                        if AuId not in new_data.get('AA.AuId'):
-                            new_data['AA.AuId'].append(AuId)
-                        if AuId not in path[Id]:
-                            path[Id].append(AuId)
+            #two jumps
+            if destination in RIds:
+                result.append([source, Id, destination])
 
-            #from F.FId
-            if Fields:
+            #three jumps
+            #case 2-5
+            if Conf and destEntity.get('C'):
+                if Conf.get('CId') == destEntity.get('C').get('CId'):
+                    result.append([source, Id, Conf.get('CId'), destination])
+
+            if Journal and destEntity.get('J'):
+                if Journal.get('JId') == destEntity.get('J').get('JId'):
+                    result.append([source, Id, Journal.get('JId'), destination])
+
+            if Fields and destEntity.get('F'):
                 for Field in Fields:
-                    FId = Field.get('FId')
-                    if FId in old_data['F.FId']:
-                        if not path.has_key(FId):
-                            path[FId] = []
+                    for f in destEntity.get('F'):
+                        if Field.get('FId') == f.get('FId'):
+                            result.append([source, Id, Field.get('FId'), destination])
 
-                        #to id
-                        if Id not in new_data.get('Id'):
-                            new_data['Id'].append(Id)
-                        if Id not in path[FId]:
-                            path[FId].append(Id)
-
-            #from C.CId
-            if Conf:
-                CId = Conf.get('CId')
-                if CId in old_data['C.CId']:
-                    if not path.has_key(CId):
-                        path[CId] = []
-
-                    #to id
-                    if Id not in new_data.get('Id'):
-                        new_data['Id'].append(Id)
-                    if Id not in path[CId]:
-                        path[CId].append(Id)
-
-            #from J.JId
-            if Journal:
-                JId = Journal.get('JId')
-                if JId in old_data['J.JId']:
-                    if not path.has_key(JId):
-                        path[JId] = []
-
-                    #to id
-                    if Id not in new_data.get('Id'):
-                        new_data['Id'].append(Id)
-                    if Id not in path[JId]:
-                        path[JId].append(Id)
-
-            #from AA.AuId
-            if AAs:
+            if AAs and destEntity.get('AA'):
                 for AA in AAs:
-                    AuId = AA.get('AuId')
-                    if AuId in old_data['AA.AuId']:
-                        if not path.has_key(AuId):
-                            path[AuId] = []
+                    for dAA in destEntity.get('AA'):
+                        if AA.get('AuId') == dAA.get('AuId'):
+                            result.append([source, Id, AA.get('AuId'), destination])
 
-                        #to Id
-                        if Id not in new_data.get('Id'):
-                            new_data['Id'].append(Id)
-                        if Id not in path[AuId]:
-                            path[AuId].append(Id)
+        #case 6
+        if entities and entities[0].get('AA'):
+            AAs = entities[0].get('AA')
+            Af = -1
+            for AA in AAs:
+                if AA.get('AuId') == source:
+                    Af = AA.get('AfId')
+            for dAA in destEntity.get('AA'):
+                if Af and dAA.get('AfId') == Af:
+                    result.append([source, Af, dAA.get('AuId'), destination])
 
-                        #to AfId
-                        for AAp in AAs:
-                            if not AAp.has_key('AfId'):
-                                continue
-                            AfId = AAp.get('AfId')
-                            if AfId not in new_data.get('AA.AfId'):
-                                new_data['AA.AfId'].append(AfId)
-                            if AfId not in path[AuId]:
-                                path[AuId].append(AfId)
+        #case 1 bottle neck
 
-            #from AA.AfId
-            if AAs:
-                for AA in AAs:
-                    if not AA.has_key('AfId'):
-                        continue
-                    AfId = AA.get('AfId')
-                    if AfId in old_data['AA.AfId']:
-                        if not path.has_key(AfId):
-                            path[AfId] = []
+        for entity in entities:
+            expr = ""
+            counter = 0
+            RIds = entity.get('RId')
+            if RIds:
+                for RId in RIds:
+                    expr = wrapReq(expr, 'Id', RId, 'Or')
+                    counter += 1
+                    if counter == MAX_REQ_NUM:
+                        expr = wrapReq(expr, 'RId', destination, 'And')
+                        response = sendREQ(expr)
+                        for newE in response.get('entities'):
+                            result.append([source, entity.get('Id'), newE.get('Id'), destination])
+                        counter = 0
+                        expr  = ""
 
-                        #to AuId
-                        for AAp in AAs:
-                            AuId = AAp.get('AuId')
-                            if AuId not in new_data.get('AA.AuId'):
-                                new_data['AA.AuId'].append(AuId)
-                            if AuId not in path[AfId]:
-                                path[AfId].append(AuId)
+                if len(expr)>0:
+                    expr = wrapReq(expr, 'RId', destination, 'And')
+                    response = sendREQ(expr)
+                    for newE in response.get('entities'):
+                        result.append([source, entity.get('Id'), newE.get('Id'), destination])
+
+    #end with AuId
+    else:
+        #three jumps    bottle neck
+        for entity in entities:
+            expr = ""
+            counter = 0
+            RIds = entity.get('RId')
+            if RIds:
+                for RId in RIds:
+                    expr = wrapReq(expr, 'Id', RId, 'Or')
+                    counter += 1
+                    if counter == MAX_REQ_NUM:
+                        expr = wrapReq(expr, 'AA.AuId', destination, 'And')
+                        response = sendREQ(expr)
+                        for newE in response.get('entities'):
+                            result.append([source, entity.get('Id'), newE.get('Id'), destination])
+                        counter = 0
+                        expr = ""
+
+                if len(expr)>0:
+                    expr = wrapReq(expr, 'AA.AuId', destination, 'And')
+                    response = sendREQ(expr)
+                    for newE in response.get('entities'):
+                        result.append([source, entity.get('Id'), newE.get('Id'), destination])
+
+        #two jumps
+        #case 1
+        expr = ""
+        params_dic['count'] = '1'
+        expr = wrapReq(expr, 'AA.AuId', destination, 'Or')
+        response = sendREQ(expr)
+        params_dic['count'] = '1000'
+        destEntity = response.get('entities')[0]
+        dAAs = destEntity.get('AA')
+        AAs = entities[0].get("AA")
+        if AAs and dAAs:
+            for AA in AAs:
+                for dAA in dAAs:
+                    if AA.get('AuId') == source and dAA.get('AfId') == AA.get('AfId') and dAA.get('AuId') == destination:
+                        result.append([source, AA.get('AfId'), destination])
+
+        #case 2
+        expr = ""
+        expr = wrapReq(expr, 'AA.AuId', source, 'And')
+        expr = wrapReq(expr, 'AA.AuId', destination, 'And')
+        response = sendREQ(expr)
+        for e in response.get('entities'):
+            result.append([source, e.get('Id'), destination])
 
 
-#print path
-print
-print "Results:"
-print calPath(path, source, destination)
+print len(result)
+print result
 
 conn.close()
 
